@@ -19,7 +19,7 @@ fn main() {
         std::process::exit(1);
     }
     if let Some(found) = found.unwrap() {
-        println!("Found pid {}", found.pid);
+        found.print();
     } else {
         println!("Target \"{}\" did not match any running PIDs or executables.", target);
         std::process::exit(1);

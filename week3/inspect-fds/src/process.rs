@@ -37,6 +37,10 @@ impl Process {
         }
         Some(open_files)
     }
+
+    pub fn print(&self) {
+        println!("==== \"{}\" (pid {}, ppid {}) ====", self.command, self.pid, self.ppid);
+    }
 }
 
 #[cfg(test)]
