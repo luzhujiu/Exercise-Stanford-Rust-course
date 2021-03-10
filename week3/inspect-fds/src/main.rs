@@ -18,8 +18,13 @@ fn main() {
         println!("error: {:?}", found);
         std::process::exit(1);
     }
-    if let Some(found) = found.unwrap() {
-        found.print();
+    if let Some(current_process) = found.unwrap() {
+        current_process.print();
+
+        for child_process in ps_utils::get_child_processes(current_process.pid).expect("fail to get child process") {
+            child_process.print();
+        }
+        
     } else {
         println!("Target \"{}\" did not match any running PIDs or executables.", target);
         std::process::exit(1);
