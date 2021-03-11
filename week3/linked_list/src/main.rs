@@ -8,21 +8,18 @@ fn main() {
     for i in 1..12 {
         list.push_front(i);
     }
+    /*
     println!("{}", list);
     println!("list size: {}", list.get_size());
     println!("top element: {}", list.pop_front().unwrap());
     println!("{}", list);
     println!("size: {}", list.get_size());
     println!("{}", list.to_string()); // ToString impl for anything impl Display
+    */
     
-    let mut clone: LinkedList<u32> = list.clone();
-    println!("orginal = {}", list);
-    println!("clone = {}", clone);
-    
-    // If you implement iterator trait:
-    //for val in &list {
-    //    println!("{}", val);
-    //}
+    for val in &list {
+        println!("{}", val);
+    }
 }
 
 #[cfg(test)]
@@ -45,6 +42,7 @@ mod tests {
         assert!(list != clone);
     }
 
+    /*
     #[test]
     fn test_iterator() {
         let mut list: LinkedList<u32> = LinkedList::new();
@@ -59,5 +57,6 @@ mod tests {
         ans.reverse();
         assert!((1..12).collect::<Vec<u32>>() == ans);
     }
+    */
 }
 

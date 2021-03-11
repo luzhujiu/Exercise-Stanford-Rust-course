@@ -114,14 +114,29 @@ impl<T> Drop for LinkedList<T> {
     }
 }
 
-impl<T: Clone> Iterator for LinkedList<T> {
+pub struct LinkedListIter<'a, T> {
+    current: &'a Option<Box<Node<T>>>,
+}
+
+impl<T: Clone> Iterator for LinkedListIter<'_, T> {
     type Item = T;
-    
     fn next(&mut self) -> Option<T> {
-        self.pop_front()
+        match self.current {
+            Some(node) => {
+                self.current = &node.next;
+                Some(node.value.clone())
+            },
+            None => None
+        }
     }
 }
 
+impl<'a, T: Clone> IntoIterator for &'a LinkedList<T> {
+    type Item = T;
+    type IntoIter = LinkedListIter<'a, T>;
 
-
+    fn into_iter(self) -> LinkedListIter<'a, T> {
+        LinkedListIter {current: &self.head}
+    }
+}
 
