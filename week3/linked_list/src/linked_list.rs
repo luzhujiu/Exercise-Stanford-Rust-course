@@ -61,6 +61,49 @@ impl<T: fmt::Display> fmt::Display for LinkedList<T> {
     }
 }
 
+impl<T: Clone> Clone for LinkedList<T> {
+    fn clone(&self) -> Self {
+        let mut current: &Option<Box<Node<T>>> = &self.head;
+        let mut values = vec![];
+        loop {
+            match current {
+                Some(node) => {
+                    let value = values.push(node.value.clone());
+                    current = &node.next;
+                },
+                None => break,
+            }
+        }
+        values.reverse();
+        let mut new_list = LinkedList::new();
+        for value in values {
+            new_list.push_front(value);
+        }
+        return new_list;
+    }
+}
+
+impl<T: PartialEq> PartialEq for LinkedList<T> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.size == other.size {
+            let mut current: &Option<Box<Node<T>>> = &self.head;
+            let mut current2: &Option<Box<Node<T>>> = &other.head;
+            for _ in 0..self.size {
+               let node = current.as_ref().unwrap();
+               let node2 = current2.as_ref().unwrap();
+               if node.value != node2.value {
+                   return false;
+               } else {
+                   current = &node.next;
+                   current2 = &node2.next;
+               }
+            }
+            return true;
+        } else {
+            return false;
+        }
+    }
+}
 
 impl<T> Drop for LinkedList<T> {
     fn drop(&mut self) {
@@ -70,5 +113,15 @@ impl<T> Drop for LinkedList<T> {
         }
     }
 }
+
+impl<T: Clone> Iterator for LinkedList<T> {
+    type Item = T;
+    
+    fn next(&mut self) -> Option<T> {
+        self.pop_front()
+    }
+}
+
+
 
 
