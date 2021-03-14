@@ -1,5 +1,5 @@
 use crate::debugger_command::DebuggerCommand;
-use crate::inferior::Inferior;
+use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -32,16 +32,40 @@ impl Debugger {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
+                    if self.inferior.is_some() {
+                        let pid = self.inferior.as_ref().unwrap().pid();
+                        if let Ok(_) = self.inferior.take().unwrap().kill() {
+                            println!("Killing running inferior (pid {})", pid);
+                        } else {
+                            println!("Kill (Invalid Input)");
+                        }
+                    }
+
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         self.inferior = Some(inferior);
-                        let status_code = self.inferior.as_mut().unwrap().continuee();
-                        println!("Child exited (status {})", status_code);
+                        if let Ok(status) = self.inferior.as_mut().unwrap().continuee() {
+                            println!("{}", status);
+                        } else {
+                            println!("Error continue");
+                        }
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
                 DebuggerCommand::Quit => {
                     return;
+                }
+                DebuggerCommand::Continue => {
+                    if self.inferior.is_some() {
+                        let status = self.inferior.as_mut().unwrap().continuee();
+                        if status.is_ok() {
+                            println!("{}", status.unwrap());
+                        } else {
+                            println!("inferior is not running. {:?}", status);
+                        }
+                    } else {
+                        println!("inferior is not running.");
+                    }
                 }
             }
         }

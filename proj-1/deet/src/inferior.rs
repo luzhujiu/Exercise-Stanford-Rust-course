@@ -4,7 +4,9 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::process::{Child, Command};
 use std::os::unix::process::CommandExt;
+use std::fmt;
 
+#[derive(Debug)]
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
     /// current instruction pointer that it is stopped at.
@@ -16,6 +18,27 @@ pub enum Status {
     /// Indicates the inferior exited due to a signal. Contains the signal that killed the
     /// process.
     Signaled(signal::Signal),
+}
+
+impl PartialEq for Status {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Status::Stopped(sig1,_), Status::Stopped(sig2,_)) => sig1 == sig2,
+            (Status::Exited(code1), Status::Exited(code2)) => code1 == code2,
+            (Status::Signaled(sig1), Status::Signaled(sig2)) => sig1 == sig2,
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for Status {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Status::Stopped(signal, usize) => write!(f, "Child stopped (signal {})", signal.to_string()),
+            Status::Exited(code) => write!(f, "Child exited (status = {})", code),
+            Status::Signaled(signal) => write!(f, "Child signaled (signal {})", signal.to_string()),
+        }
+    }
 }
 
 /// This function calls ptrace with PTRACE_TRACEME to enable debugging on a process. You should use
@@ -43,15 +66,11 @@ impl Inferior {
 
         let me = Inferior { child };
         let status = me.wait(None).ok()?;
-        match status {
-            Status::Stopped(sig, _) => {
-                if sig == signal::Signal::SIGTRAP {
-                    return Some(me);
-                }
-            },
-            _ => {}
-        }    
-        return None;        
+        if status == Status::Stopped(signal::Signal::SIGTRAP, 0) {
+            return Some(me);
+        } else {
+            return None;
+        }
     }
 
     /// Returns the pid of this inferior.
@@ -77,19 +96,12 @@ impl Inferior {
         })
     }
 
-    pub fn continuee(&self) -> i32 {
-        if ptrace::cont(self.pid(), None).is_ok() {
-            let status = self.wait(None);
-            match status {
-                Ok(Status::Exited(exit_code)) => {
-                    return 0;
-                },
-                _ => {
-                return -1;
-                }
-            }
-        } else {
-            return -1;
-        }
+    pub fn continuee(&self) -> Result<Status, nix::Error> {
+        ptrace::cont(self.pid(), None)?;
+        self.wait(None)
+    }
+
+    pub fn kill(&mut self) -> Result<(),std::io::Error> {
+        self.child.kill()
     }
 }
