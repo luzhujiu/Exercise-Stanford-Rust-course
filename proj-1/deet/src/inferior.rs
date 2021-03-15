@@ -35,9 +35,23 @@ impl PartialEq for Status {
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Status::Stopped(signal, usize) => write!(f, "Child stopped (signal {})", signal.to_string()),
+            Status::Stopped(signal, rip) => write!(f, "Child stopped (signal {})", signal.to_string()),
             Status::Exited(code) => write!(f, "Child exited (status = {})", code),
             Status::Signaled(signal) => write!(f, "Child signaled (signal {})", signal.to_string()),
+        }
+    }
+}
+
+impl Status {
+    pub fn print(&self, debug_data: &DwarfData){
+        println!("{}", self);
+        match self {
+            Status::Stopped(_, rip) => {
+                let line: Line = debug_data.get_line_from_addr(*rip).expect("get_line_from_addr fail.");
+                let name = debug_data.get_function_from_addr(*rip).expect("get_func_from_addr fail.");
+                println!("Stopped at {} ({}:{})", name, line.file, line.number);
+            },
+            _ => {}
         }
     }
 }

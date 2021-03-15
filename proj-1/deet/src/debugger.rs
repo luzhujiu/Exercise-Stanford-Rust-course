@@ -15,7 +15,7 @@ pub struct Debugger {
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
-        //Load DwarfData
+        //Initialize the DwarfData
         let debug_data = match DwarfData::from_file(target) {
             Ok(val) => val,
             Err(DwarfError::ErrorOpeningFile) => {
@@ -58,7 +58,7 @@ impl Debugger {
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         self.inferior = Some(inferior);
                         if let Ok(status) = self.inferior.as_mut().unwrap().continuee() {
-                            println!("{}", status);
+                            status.print(&self.debug_data);
                         } else {
                             println!("Error continue");
                         }
@@ -81,7 +81,7 @@ impl Debugger {
                     if self.inferior.is_some() {
                         let status = self.inferior.as_mut().unwrap().continuee();
                         if status.is_ok() {
-                            println!("{}", status.unwrap());
+                            status.unwrap().print(&self.debug_data);
                         } else {
                             println!("inferior is not running. {:?}", status);
                         }
