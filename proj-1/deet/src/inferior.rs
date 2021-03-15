@@ -101,7 +101,9 @@ impl Inferior {
         self.wait(None)
     }
 
-    pub fn kill(&mut self) -> Result<(),std::io::Error> {
-        self.child.kill()
+    pub fn kill(&mut self) -> Result<Status, nix::Error> {
+        //self.child.kill()?;
+        ptrace::kill(self.pid())?;
+        self.wait(None)
     }
 }

@@ -53,6 +53,14 @@ impl Debugger {
                     }
                 }
                 DebuggerCommand::Quit => {
+                    if self.inferior.is_some() {
+                        let pid = self.inferior.as_ref().unwrap().pid();
+                        if let Ok(_) = self.inferior.take().unwrap().kill() {
+                            println!("Killing running inferior (pid {})", pid);
+                        } else {
+                            println!("Kill (Invalid Input)");
+                        }
+                    }
                     return;
                 }
                 DebuggerCommand::Continue => {
