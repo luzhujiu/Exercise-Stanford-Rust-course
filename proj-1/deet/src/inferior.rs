@@ -5,6 +5,7 @@ use nix::unistd::Pid;
 use std::process::{Child, Command};
 use std::os::unix::process::CommandExt;
 use std::fmt;
+use crate::dwarf_data::{DwarfData, Line};
 
 #[derive(Debug)]
 pub enum Status {
@@ -58,7 +59,7 @@ impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
     pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
-        let mut child = unsafe { Command::new(target)
+        let child = unsafe { Command::new(target)
             .args(args)
             .pre_exec(child_traceme)
             .spawn()
@@ -105,5 +106,24 @@ impl Inferior {
         //self.child.kill()?;
         ptrace::kill(self.pid())?;
         self.wait(None)
+    }
+
+    pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
+        let regs = ptrace::getregs(self.pid())?;
+        let mut rip: usize = regs.rip as usize;
+        let mut rbp: usize = regs.rbp as usize;
+
+        loop {
+            let line: Line = debug_data.get_line_from_addr(rip).expect("get_line_from_addr fail.");
+            let name = debug_data.get_function_from_addr(rip).expect("get_func_from_addr fail.");
+            println!("{} ({}:{})", name, line.file, line.number);
+            if name == "main" {
+                break;
+            }
+            rip = ptrace::read(self.pid(), (rbp + 8) as ptrace::AddressType)? as usize;
+            rbp = ptrace::read(self.pid(), rbp as ptrace::AddressType)? as usize;
+        }
+
+        Ok(())
     }
 }
