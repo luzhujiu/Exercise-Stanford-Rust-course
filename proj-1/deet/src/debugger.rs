@@ -10,6 +10,7 @@ pub struct Debugger {
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data: DwarfData,
+    breakpoints: Vec<usize>,
 }
 
 impl Debugger {
@@ -28,6 +29,8 @@ impl Debugger {
             }
         };
 
+        debug_data.print();
+
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
         // Attempt to load history from ~/.deet_history if it exists
@@ -39,6 +42,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
+            breakpoints: vec![],
         }
     }
 
@@ -55,7 +59,7 @@ impl Debugger {
                         }
                     }
 
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
                         self.inferior = Some(inferior);
                         if let Ok(status) = self.inferior.as_mut().unwrap().continuee() {
                             status.print(&self.debug_data);
@@ -97,6 +101,12 @@ impl Debugger {
                         }
                     } else {
                         println!("inferior is not running.")
+                    }
+                }
+                DebuggerCommand::Breakpoint(address) => {
+                    if let Some(address) = address {
+                        println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), address);
+                        self.breakpoints.push(address);
                     }
                 }
             }

@@ -35,7 +35,7 @@ impl PartialEq for Status {
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Status::Stopped(signal, rip) => write!(f, "Child stopped (signal {})", signal.to_string()),
+            Status::Stopped(signal, _) => write!(f, "Child stopped (signal {})", signal.to_string()),
             Status::Exited(code) => write!(f, "Child exited (status = {})", code),
             Status::Signaled(signal) => write!(f, "Child signaled (signal {})", signal.to_string()),
         }
@@ -65,6 +65,11 @@ fn child_traceme() -> Result<(), std::io::Error> {
     )))
 }
 
+use std::mem::size_of;
+fn align_addr_to_word(addr: usize) -> usize {
+    addr & (-(size_of::<usize>() as isize) as usize)
+}
+
 pub struct Inferior {
     child: Child,
 }
@@ -72,15 +77,21 @@ pub struct Inferior {
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
+    pub fn new(target: &str, args: &Vec<String>, breakpoints: &Vec<usize>) -> Option<Inferior> {
         let child = unsafe { Command::new(target)
             .args(args)
             .pre_exec(child_traceme)
             .spawn()
             .ok()? };
 
-        let me = Inferior { child };
+        let mut me = Inferior { child };
+        
         let status = me.wait(None).ok()?;
+
+        for addr in breakpoints {
+            me.write_byte(*addr, 0xcc).ok()?;
+        }
+
         if status == Status::Stopped(signal::Signal::SIGTRAP, 0) {
             return Some(me);
         } else {
@@ -139,5 +150,20 @@ impl Inferior {
         }
 
         Ok(())
+    }
+
+    fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
+        let aligned_addr = align_addr_to_word(addr);
+        let byte_offset = addr - aligned_addr;
+        let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
+        let orig_byte = (word >> 8 * byte_offset) & 0xff;
+        let masked_word = word & !(0xff << 8 * byte_offset);
+        let updated_word = masked_word | ((val as u64) << 8 * byte_offset);
+        ptrace::write(
+            self.pid(),
+            aligned_addr as ptrace::AddressType,
+            updated_word as *mut std::ffi::c_void,
+        )?;
+        Ok(orig_byte as u8)
     }
 }
