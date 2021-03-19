@@ -6,6 +6,13 @@ use std::process::{Child, Command};
 use std::os::unix::process::CommandExt;
 use std::fmt;
 use crate::dwarf_data::{DwarfData, Line};
+use std::collections::HashMap;
+
+#[derive(Clone, Debug)]
+pub struct Breakpoint {
+    addr: usize,
+    orig_byte: u8,
+}
 
 #[derive(Debug)]
 pub enum Status {
@@ -25,7 +32,7 @@ impl PartialEq for Status {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Status::Stopped(sig1,_), Status::Stopped(sig2,_)) => sig1 == sig2,
-            (Status::Exited(code1), Status::Exited(code2)) => code1 == code2,
+            (Status::Exited(sig1), Status::Exited(sig2)) => sig1 == sig2,
             (Status::Signaled(sig1), Status::Signaled(sig2)) => sig1 == sig2,
             _ => false,
         }
@@ -72,6 +79,7 @@ fn align_addr_to_word(addr: usize) -> usize {
 
 pub struct Inferior {
     child: Child,
+    breakpoints: HashMap<usize, Breakpoint>
 }
 
 impl Inferior {
@@ -84,18 +92,25 @@ impl Inferior {
             .spawn()
             .ok()? };
 
-        let mut me = Inferior { child };
+        let mut me = Inferior { child, breakpoints: HashMap::new() };
         
         let status = me.wait(None).ok()?;
 
         for addr in breakpoints {
-            me.write_byte(*addr, 0xcc).ok()?;
+            me.set_breakpoint(*addr);
         }
-
+        
         if status == Status::Stopped(signal::Signal::SIGTRAP, 0) {
             return Some(me);
         } else {
             return None;
+        }
+    }
+    
+    /// set break point
+    pub fn set_breakpoint(&mut self, addr: usize) {
+        if let Ok(orig_byte) = self.write_byte(addr, 0xcc) { 
+            self.breakpoints.insert(addr, Breakpoint{ addr, orig_byte });
         }
     }
 
@@ -122,10 +137,37 @@ impl Inferior {
         })
     }
 
-    pub fn continuee(&self) -> Result<Status, nix::Error> {
+    pub fn continuee(&mut self) -> Result<Status, nix::Error> {
+        let mut regs = ptrace::getregs(self.pid())?;
+        let rip = regs.rip as usize;
+
+        if self.breakpoints.contains_key(&rip) {
+            ptrace::step(self.pid(), None)?;
+            let status = self.wait(None)?;
+            if status == Status::Stopped(signal::Signal::SIGTRAP,0) {  
+                let breakpoint = self.breakpoints.get(&rip).unwrap().to_owned();  
+                self.write_byte(breakpoint.addr, 0xcc)?;
+            } else {
+                return Ok(status);
+            }
+        }
+
         ptrace::cont(self.pid(), None)?;
-        self.wait(None)
+        let status = self.wait(None)?;
+
+        if let Status::Stopped(signal::Signal::SIGTRAP, rip) = status {
+            if self.breakpoints.contains_key(&(rip-1)) {
+                let breakpoint = self.breakpoints.get(&(rip-1)).unwrap().to_owned();
+                self.write_byte(breakpoint.addr, breakpoint.orig_byte)?;
+                let mut regs = ptrace::getregs(self.pid())?;
+                regs.rip -= 1;
+                ptrace::setregs(self.pid(), regs)?;
+            }
+        } 
+
+        return Ok(status);
     }
+    
 
     pub fn kill(&mut self) -> Result<Status, nix::Error> {
         //self.child.kill()?;
@@ -165,5 +207,13 @@ impl Inferior {
             updated_word as *mut std::ffi::c_void,
         )?;
         Ok(orig_byte as u8)
+    }
+
+    fn print_word(&self, addr: usize) -> Result<(), nix::Error>{
+        let aligned_addr = align_addr_to_word(addr);
+        let byte_offset = addr - aligned_addr;
+        let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
+        println!("{:#x}", word);
+        Ok(())
     }
 }

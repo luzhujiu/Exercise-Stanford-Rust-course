@@ -104,9 +104,13 @@ impl Debugger {
                     }
                 }
                 DebuggerCommand::Breakpoint(address) => {
-                    if let Some(address) = address {
-                        println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), address);
-                        self.breakpoints.push(address);
+                    if let Some(addr) = address {
+                        println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), addr);
+                        if self.inferior.is_none() {
+                            self.breakpoints.push(addr);
+                        } else {
+                            self.inferior.as_mut().unwrap().set_breakpoint(addr);
+                        }
                     }
                 }
             }
