@@ -73,10 +73,11 @@ impl Debugger {
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {
                         let pid = self.inferior.as_ref().unwrap().pid();
-                        if let Ok(_) = self.inferior.take().unwrap().kill() {
+                        let res = self.inferior.take().unwrap().kill();
+                        if res.is_ok() {
                             println!("Killing running inferior (pid {})", pid);
                         } else {
-                            println!("Kill (Invalid Input)");
+                            println!("{:?}", res);
                         }
                     }
                     return;
@@ -105,7 +106,7 @@ impl Debugger {
                 }
                 DebuggerCommand::Breakpoint(address) => {
                     if let Some(addr) = address {
-                        println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), addr);
+                        println!("Set breakpoint {} at {}", self.breakpoints.len(), addr);
                         if self.inferior.is_none() {
                             self.breakpoints.push(addr);
                         } else {

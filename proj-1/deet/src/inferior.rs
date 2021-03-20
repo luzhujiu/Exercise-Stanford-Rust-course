@@ -63,6 +63,24 @@ impl Status {
     }
 }
 
+#[derive(Debug)]
+pub enum Error {
+    NixError(nix::Error),
+    IOError(std::io::Error),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Error {
+        Error::IOError(error)
+    }
+}
+
+impl From<nix::Error> for Error {
+    fn from(error: nix::Error) -> Error {
+        Error::NixError(error)
+    }
+}
+
 /// This function calls ptrace with PTRACE_TRACEME to enable debugging on a process. You should use
 /// pre_exec with Command to call this in the child process.
 fn child_traceme() -> Result<(), std::io::Error> {
@@ -169,10 +187,10 @@ impl Inferior {
     }
     
 
-    pub fn kill(&mut self) -> Result<Status, nix::Error> {
-        //self.child.kill()?;
-        ptrace::kill(self.pid())?;
-        self.wait(None)
+    pub fn kill(&mut self) -> Result<Status, Error> {
+        self.child.kill()?;
+        let status = self.wait(None)?;
+        Ok(status)
     }
 
     pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
