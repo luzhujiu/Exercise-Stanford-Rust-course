@@ -104,14 +104,16 @@ impl Debugger {
                         println!("inferior is not running.")
                     }
                 }
-                DebuggerCommand::Breakpoint(address) => {
-                    if let Some(addr) = address {
-                        println!("Set breakpoint {} at {}", self.breakpoints.len(), addr);
+                DebuggerCommand::Breakpoint(address_str) => {
+                    if let Some(addr) = self.parse_address(&address_str) {
+                        println!("Set breakpoint {} at {:#x}", self.breakpoints.len(), addr);
                         if self.inferior.is_none() {
                             self.breakpoints.push(addr);
                         } else {
                             self.inferior.as_mut().unwrap().set_breakpoint(addr);
                         }
+                    } else {
+                        println!("break point not set for {}", address_str);
                     }
                 }
             }
@@ -158,4 +160,25 @@ impl Debugger {
             }
         }
     }
+
+    fn parse_address(&self, str: &str) -> Option<usize> {
+        if str.starts_with("*") {
+            parse_address(&str[1..])
+        } else {
+            if let Ok(line_number) = str.parse::<usize>() {
+                self.debug_data.get_addr_for_line(None, line_number)
+            } else {
+                self.debug_data.get_addr_for_function(None, str)
+            }
+        }
+    }
+}
+
+fn parse_address(addr: &str) -> Option<usize> {
+    let addr_without_0x = if addr.to_lowercase().starts_with("0x") {
+        &addr[2..]
+    } else {
+        &addr
+    };
+    usize::from_str_radix(addr_without_0x, 16).ok()
 }
