@@ -50,16 +50,17 @@ impl fmt::Display for Status {
 }
 
 impl Status {
-    pub fn print(&self, debug_data: &DwarfData){
+    pub fn print(&self, debug_data: &DwarfData) -> Option<()>{
         println!("{}", self);
         match self {
             Status::Stopped(_, rip) => {
-                let line: Line = debug_data.get_line_from_addr(*rip).expect("get_line_from_addr fail.");
-                let name = debug_data.get_function_from_addr(*rip).expect("get_func_from_addr fail.");
+                let line: Line = debug_data.get_line_from_addr(*rip)?;
+                let name = debug_data.get_function_from_addr(*rip)?;
                 println!("Stopped at {} ({}:{})", name, line.file, line.number);
             },
             _ => {}
         }
+        Some(())
     }
 }
 
@@ -153,6 +154,43 @@ impl Inferior {
             },
             other => panic!("waitpid returned unexpected status: {:?}", other),
         })
+    }
+
+    pub fn next(&mut self, dwarf: &DwarfData) -> Result<Status, nix::Error> {
+        let mut regs = ptrace::getregs(self.pid())?;
+        let rip = regs.rip as usize;
+        if let Some(current_line) = dwarf.get_line_from_addr(rip) { 
+            println!("current_line = {}", current_line);
+            loop {       
+                ptrace::step(self.pid(), None)?;
+                let status = self.wait(None)?;
+                if let Status::Stopped(signal::Signal::SIGTRAP, rip) = status {
+                    if let Some(line) = dwarf.get_line_from_addr(rip) {
+                        if current_line.to_string() != line.to_string() {
+                            println!("enter2");
+                            return Ok(status);
+                        }
+                    } else {
+                        println!("enter3 {}", status);
+                        return Ok(status);
+                    }
+                } else {
+                    return Ok(status);
+                }
+            }
+        } else {
+            println!("enter");
+            loop {
+                ptrace::step(self.pid(), None)?;
+                let status = self.wait(None)?;
+                if let Status::Stopped(signal::Signal::SIGTRAP, rip) = status {
+                    if let Some(line) = dwarf.get_line_from_addr(rip) {
+                        println!("line = {}", line);
+                        return Ok(status);
+                    }
+                }
+            }
+        }
     }
 
     pub fn continuee(&mut self) -> Result<Status, nix::Error> {

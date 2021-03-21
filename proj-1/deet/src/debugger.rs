@@ -101,7 +101,7 @@ impl Debugger {
                             println!("back trace fail. {:?}", res);
                         }
                     } else {
-                        println!("inferior is not running.")
+                        println!("inferior is not running.");
                     }
                 }
                 DebuggerCommand::Breakpoint(address_str) => {
@@ -115,6 +115,18 @@ impl Debugger {
                     } else {
                         println!("break point not set for {}", address_str);
                     }
+                }
+                DebuggerCommand::Next => {
+                    if self.inferior.is_some() {
+                        let status = self.inferior.as_mut().unwrap().next(&self.debug_data);
+                        if status.is_ok() {
+                            status.unwrap().print(&self.debug_data);    
+                        } else {
+                            println!("{:?}", status);
+                        }
+                    } else {
+                        println!("inferior is not running.");
+                    }    
                 }
             }
         }
