@@ -50,17 +50,23 @@ impl fmt::Display for Status {
 }
 
 impl Status {
-    pub fn print(&self, debug_data: &DwarfData) -> Option<()>{
-        println!("{}", self);
+    pub fn print(&self, debug_data: &DwarfData) {
         match self {
             Status::Stopped(_, rip) => {
-                let line: Line = debug_data.get_line_from_addr(*rip)?;
-                let name = debug_data.get_function_from_addr(*rip)?;
-                println!("Stopped at {} ({}:{})", name, line.file, line.number);
+                let line = debug_data.get_line_from_addr(*rip);
+                let name = debug_data.get_function_from_addr(*rip);
+                if line.is_some() && name.is_some() {
+                    let line = line.unwrap();
+                    let name = name.unwrap();
+                    println!("Stopped at {} ({}:{})", name, line.file, line.number);
+                } else {
+                    println!("can not print");
+                }
             },
-            _ => {}
+            _ => {
+                println!("can not print");
+            }
         }
-        Some(())
     }
 }
 
@@ -156,39 +162,51 @@ impl Inferior {
         })
     }
 
+    pub fn step(&mut self, dwarf: &DwarfData) -> Result<Status, nix::Error> {
+        let mut regs = ptrace::getregs(self.pid())?;
+        let rip = regs.rip as usize;
+
+        if self.breakpoints.contains_key(&rip) {
+            ptrace::step(self.pid(), None)?;
+            let status = self.wait(None)?;
+            if status == Status::Stopped(signal::Signal::SIGTRAP,0) {
+                let breakpoint = self.breakpoints.get(&rip).unwrap().to_owned();    
+                self.write_byte(breakpoint.addr, 0xcc)?;
+            } 
+            return Ok(status);
+        }
+
+        ptrace::step(self.pid(), None)?;
+        let status = self.wait(None)?;
+
+        if let Status::Stopped(signal::Signal::SIGTRAP, rip) = status {
+            if self.breakpoints.contains_key(&(rip-1)) {
+                let breakpoint = self.breakpoints.get(&(rip-1)).unwrap().to_owned();
+                self.write_byte(breakpoint.addr, breakpoint.orig_byte)?;
+                let mut regs = ptrace::getregs(self.pid())?;
+                regs.rip -= 1;
+                ptrace::setregs(self.pid(), regs)?;
+            }
+        } 
+        
+        return Ok(status);
+    }
+
     pub fn next(&mut self, dwarf: &DwarfData) -> Result<Status, nix::Error> {
         let mut regs = ptrace::getregs(self.pid())?;
         let rip = regs.rip as usize;
-        if let Some(current_line) = dwarf.get_line_from_addr(rip) { 
-            println!("current_line = {}", current_line);
-            loop {       
-                ptrace::step(self.pid(), None)?;
-                let status = self.wait(None)?;
-                if let Status::Stopped(signal::Signal::SIGTRAP, rip) = status {
-                    if let Some(line) = dwarf.get_line_from_addr(rip) {
-                        if current_line.to_string() != line.to_string() {
-                            println!("enter2");
-                            return Ok(status);
-                        }
-                    } else {
-                        println!("enter3 {}", status);
-                        return Ok(status);
-                    }
-                } else {
-                    return Ok(status);
-                }
-            }
-        } else {
-            println!("enter");
-            loop {
-                ptrace::step(self.pid(), None)?;
-                let status = self.wait(None)?;
-                if let Status::Stopped(signal::Signal::SIGTRAP, rip) = status {
-                    if let Some(line) = dwarf.get_line_from_addr(rip) {
-                        println!("line = {}", line);
+        let current_line = dwarf.get_line_from_addr(rip).expect("should have line number");
+        
+        loop {
+            let status = self.step(dwarf)?;
+            if let Status::Stopped(signal::Signal::SIGTRAP, rip) = status {
+                if let Some(line) = dwarf.get_line_from_addr(rip) {
+                    if current_line.to_string() != line.to_string() {
                         return Ok(status);
                     }
                 }
+            } else {
+                return Ok(status);
             }
         }
     }

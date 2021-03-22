@@ -6,7 +6,7 @@ void func1(int a) {
 }
 
 int main() {
+    func1(0);
     func1(1);
     func1(2);
-    func1(3);
 }
