@@ -5,7 +5,7 @@ use nix::unistd::Pid;
 use std::process::{Child, Command};
 use std::os::unix::process::CommandExt;
 use std::fmt;
-use crate::dwarf_data::{DwarfData, Line};
+use crate::dwarf_data::{DwarfData, Line, Location};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::fs;
@@ -86,6 +86,7 @@ impl Status {
 pub enum Error {
     NixError(nix::Error),
     IOError(std::io::Error),
+    NoVariable,
 }
 
 impl From<std::io::Error> for Error {
@@ -205,7 +206,7 @@ impl Inferior {
     }
 
     pub fn next(&mut self, dwarf: &DwarfData) -> Result<Status, nix::Error> {
-        let mut regs = ptrace::getregs(self.pid())?;
+        let regs = ptrace::getregs(self.pid())?;
         let rip = regs.rip as usize;
         let current_line = dwarf.get_line_from_addr(rip).expect("should have line number");
         
@@ -224,7 +225,7 @@ impl Inferior {
     }
 
     pub fn continuee(&mut self) -> Result<Status, nix::Error> {
-        let mut regs = ptrace::getregs(self.pid())?;
+        let regs = ptrace::getregs(self.pid())?;
         let rip = regs.rip as usize;
 
         if self.breakpoints.contains_key(&rip) {
@@ -280,6 +281,32 @@ impl Inferior {
         Ok(())
     }
 
+    pub fn print_variable(&self, name: &str, debug_data: &DwarfData) -> Result<(), Error> {
+        let regs = ptrace::getregs(self.pid())?;
+        let rip: usize = regs.rip as usize;
+        let rbp: usize = regs.rbp as usize;
+        let function_name = debug_data.get_function_from_addr(rip).expect("get_func_from_addr fail.");
+        let file = debug_data.files.get(0).expect("no file found");
+        let f = file.functions.iter().find(|f| f.name == function_name).expect("function not found");
+
+        if let Some(variable) = f.variables.iter().find(|v| v.name == name.to_string()) {
+            println!("variable = {:?}", variable);
+            if let Location::FramePointerOffset(offset) = variable.location {
+                let addr = rbp as isize + offset;
+                let value = self.read_int(addr as usize)?;
+                println!("value = {}", value);
+                Ok(())
+            } else {
+                Err(Error::NoVariable)
+            }
+        } else if let Some(variable) = file.global_variables.iter().find(|v| v.name == name.to_string()) {
+            println!("global variable = {:?}", variable);
+            Ok(())
+        } else {
+            Err(Error::NoVariable)
+        }
+    }
+
     fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
         let aligned_addr = align_addr_to_word(addr);
         let byte_offset = addr - aligned_addr;
@@ -295,11 +322,8 @@ impl Inferior {
         Ok(orig_byte as u8)
     }
 
-    fn print_word(&self, addr: usize) -> Result<(), nix::Error>{
-        let aligned_addr = align_addr_to_word(addr);
-        let byte_offset = addr - aligned_addr;
+    fn read_int(&self, addr: usize) -> Result<u64, nix::Error>{
         let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
-        println!("{:#x}", word);
-        Ok(())
+        Ok(word)
     }
 }

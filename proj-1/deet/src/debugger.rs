@@ -132,6 +132,15 @@ impl Debugger {
                         println!("inferior is not running.");
                     }    
                 }
+                DebuggerCommand::Print(variable_name) => {
+                    if self.inferior.is_some() {
+                        if self.inferior.as_ref().unwrap().print_variable(&variable_name, &self.debug_data).is_err() {
+                            println!("variable {} not found in current scope.", variable_name);
+                        }
+                    } else {
+                        println!("inferior is not running.");
+                    }
+                }
             }
         }
     }

@@ -5,6 +5,7 @@ pub enum DebuggerCommand {
     Backtrace,
     Breakpoint(String),
     Next,
+    Print(String),
 }
 
 impl DebuggerCommand {
@@ -20,7 +21,8 @@ impl DebuggerCommand {
             "c" | "cont" | "continue" => Some(DebuggerCommand::Continue),
             "bt" | "back" | "backtrace" => Some(DebuggerCommand::Backtrace),
             "b" | "break" => Some(DebuggerCommand::Breakpoint(tokens[1].to_string())),
-            "n" | "next" => Some(DebuggerCommand::Next), 
+            "n" | "next" => Some(DebuggerCommand::Next),
+            "p" | "print" => Some(DebuggerCommand::Print(tokens[1].to_string())),
             // Default case:
             _ => None,
         }
