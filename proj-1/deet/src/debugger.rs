@@ -3,6 +3,8 @@ use crate::inferior::{Inferior, Status};
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
+use std::collections::HashMap;
+
 
 pub struct Debugger {
     target: String,
@@ -11,6 +13,7 @@ pub struct Debugger {
     inferior: Option<Inferior>,
     debug_data: DwarfData,
     breakpoints: Vec<usize>,
+    lineinfo: HashMap<String, Vec<String>>,
 }
 
 impl Debugger {
@@ -43,6 +46,7 @@ impl Debugger {
             inferior: None,
             debug_data,
             breakpoints: vec![],
+            lineinfo: HashMap::new(),
         }
     }
 
@@ -62,7 +66,7 @@ impl Debugger {
                     if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
                         self.inferior = Some(inferior);
                         if let Ok(status) = self.inferior.as_mut().unwrap().continuee() {
-                            status.print(&self.debug_data);
+                            status.print(&self.debug_data, &mut self.lineinfo);
                         } else {
                             println!("Error continue");
                         }
@@ -86,7 +90,7 @@ impl Debugger {
                     if self.inferior.is_some() {
                         let status = self.inferior.as_mut().unwrap().continuee();
                         if status.is_ok() {
-                            status.unwrap().print(&self.debug_data);
+                            status.unwrap().print(&self.debug_data, &mut self.lineinfo);
                         } else {
                             println!("inferior is not running. {:?}", status);
                         }
@@ -120,7 +124,7 @@ impl Debugger {
                     if self.inferior.is_some() {
                         let status = self.inferior.as_mut().unwrap().next(&self.debug_data);
                         if status.is_ok() {
-                            status.unwrap().print(&self.debug_data);    
+                            status.unwrap().print(&self.debug_data, &mut self.lineinfo);    
                         } else {
                             println!("{:?}", status);
                         }

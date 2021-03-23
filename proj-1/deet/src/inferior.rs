@@ -7,6 +7,8 @@ use std::os::unix::process::CommandExt;
 use std::fmt;
 use crate::dwarf_data::{DwarfData, Line};
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use std::fs;
 
 #[derive(Clone, Debug)]
 pub struct Breakpoint {
@@ -50,7 +52,8 @@ impl fmt::Display for Status {
 }
 
 impl Status {
-    pub fn print(&self, debug_data: &DwarfData) {
+    pub fn print(&self, debug_data: &DwarfData, lineinfo: &mut HashMap<String, Vec<String>>) {
+        println!("{}", self);
         match self {
             Status::Stopped(_, rip) => {
                 let line = debug_data.get_line_from_addr(*rip);
@@ -59,6 +62,15 @@ impl Status {
                     let line = line.unwrap();
                     let name = name.unwrap();
                     println!("Stopped at {} ({}:{})", name, line.file, line.number);
+                    if let Some(lines) = lineinfo.get(&line.file) {
+                        println!("{}", lines[line.number-1]);
+                    } else {
+                        let reader = BufReader::new(fs::File::open(&line.file).unwrap());
+                        let lines = reader.lines().map(|l| l.unwrap()).collect::<Vec<String>>();
+                        println!("{}", lines[line.number-1]);
+                        lineinfo.insert(line.file, lines);
+                    }
+
                 } else {
                     println!("can not print");
                 }
@@ -104,7 +116,7 @@ fn align_addr_to_word(addr: usize) -> usize {
 
 pub struct Inferior {
     child: Child,
-    breakpoints: HashMap<usize, Breakpoint>
+    breakpoints: HashMap<usize, Breakpoint>,
 }
 
 impl Inferior {
