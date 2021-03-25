@@ -283,17 +283,19 @@ impl Inferior {
 
     pub fn print_variable(&self, name: &str, debug_data: &DwarfData) -> Result<(), Error> {
         let regs = ptrace::getregs(self.pid())?;
+        println!("regs = {:?}", regs);
         let rip: usize = regs.rip as usize;
         let rbp: usize = regs.rbp as usize;
+        let fsb: usize = regs.fs_base as usize;
         let function_name = debug_data.get_function_from_addr(rip).expect("get_func_from_addr fail.");
         let file = debug_data.files.get(0).expect("no file found");
         let f = file.functions.iter().find(|f| f.name == function_name).expect("function not found");
 
         if let Some(variable) = f.variables.iter().find(|v| v.name == name.to_string()) {
             println!("variable = {:?}", variable);
-            self.print_rbp(rbp);
+            self.print_rbp(fsb);
             if let Location::FramePointerOffset(offset) = variable.location {
-                let addr = rbp as isize + offset/2*-1;
+                let addr = fsb as isize + offset;
                 println!("addr = {:#x}",addr);
                 let value = self.read_word(addr as usize)?;
                 println!("{} = {}", variable.name, value);
@@ -341,9 +343,7 @@ impl Inferior {
 
     fn print_rbp(&self, rbp: usize) {
         println!("rbp = {:#x}", rbp);
-        let fp = self.read_word_64(rbp).expect("can not read word");
-        println!("fp = {:#x}", fp);
-        for offset in vec![-24,-16,-8,0,8,16,24,32,40,48,56,64,72] {
+        for offset in vec![-64,-56,-48,-40,-32,-24,-16,-8,0,8,16,24,32,40,48,56,64,72] {
             let addr = (rbp as isize + offset) as usize;
             let word = self.read_word_64(addr).expect("can not read word");
             println!("offset = {} word = {:#b} word = {:#x}", offset, word, word);
