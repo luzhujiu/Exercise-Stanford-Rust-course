@@ -1,13 +1,14 @@
 use crossbeam_channel;
 use std::{thread, time};
+use std::default::Default;
 
 fn parallel_map<T, U, F>(mut input_vec: Vec<T>, num_threads: usize, f: F) -> Vec<U>
 where
     F: FnOnce(T) -> U + Send + Copy + 'static,
     T: Send + 'static,
-    U: Send + 'static + Default,
+    U: Send + 'static + Default + Clone,
 {
-    let mut output_vec: Vec<U> = Vec::with_capacity(input_vec.len());
+    let mut output_vec: Vec<U> = vec![Default::default(); input_vec.len()];
     let (sender, receiver) = crossbeam_channel::unbounded();
     let (sender2, receiver2) = crossbeam_channel::unbounded();
     
@@ -17,19 +18,19 @@ where
         let receiver = receiver.clone();
         let sender2 = sender2.clone();
         threads.push(thread::spawn(move || {
-            while let Ok(next_num) = receiver.recv() {
-                let output = f(next_num);
+            while let Ok((i, elem)) = receiver.recv() {
+                let output = f(elem);
                 sender2
-                    .send(output)
+                    .send((i, output))
                     .expect("Tried writing to channel, but there are no receivers!");
                 
             }
         }))
     }
 
-    for elem in input_vec {
+    for (i, elem) in input_vec.into_iter().enumerate() {
         sender
-            .send(elem)
+            .send((i, elem))
             .expect("Tried writing to channel, but there are no receivers!");
     }
 
@@ -39,9 +40,9 @@ where
         thread.join().expect("Panic occurred in thread");
     }
 
-    for _ in 0..output_vec.capacity() {
-        let output = receiver2.recv().expect("should receive output");
-        output_vec.push(output);
+    for _ in 0..output_vec.len() {
+        let (i, output) = receiver2.recv().expect("should receive output");
+        output_vec[i] = output;
     }
 
     output_vec
