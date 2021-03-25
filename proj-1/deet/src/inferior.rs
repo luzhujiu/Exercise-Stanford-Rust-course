@@ -291,17 +291,24 @@ impl Inferior {
 
         if let Some(variable) = f.variables.iter().find(|v| v.name == name.to_string()) {
             println!("variable = {:?}", variable);
+            self.print_rbp(rbp);
             if let Location::FramePointerOffset(offset) = variable.location {
-                let addr = rbp as isize + offset;
-                let value = self.read_int(addr as usize)?;
-                println!("value = {}", value);
+                let addr = rbp as isize + offset/2*-1;
+                println!("addr = {:#x}",addr);
+                let value = self.read_word(addr as usize)?;
+                println!("{} = {}", variable.name, value);
                 Ok(())
             } else {
                 Err(Error::NoVariable)
             }
         } else if let Some(variable) = file.global_variables.iter().find(|v| v.name == name.to_string()) {
-            println!("global variable = {:?}", variable);
-            Ok(())
+            if let Location::Address(addr) = variable.location {
+                let value = self.read_word(addr as usize)?;
+                println!("{} = {}", variable.name, value);
+                Ok(())
+            } else {
+                Err(Error::NoVariable) 
+            }
         } else {
             Err(Error::NoVariable)
         }
@@ -322,8 +329,24 @@ impl Inferior {
         Ok(orig_byte as u8)
     }
 
-    fn read_int(&self, addr: usize) -> Result<u64, nix::Error>{
-        let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
+    fn read_word(&self, addr: usize) -> Result<u32, nix::Error>{
+        let word = ptrace::read(self.pid(), addr as ptrace::AddressType)? as u32;
         Ok(word)
+    }
+
+    fn read_word_64(&self, addr: usize) -> Result<u64, nix::Error>{
+        let word = ptrace::read(self.pid(), addr as ptrace::AddressType)? as u64;
+        Ok(word)
+    }
+
+    fn print_rbp(&self, rbp: usize) {
+        println!("rbp = {:#x}", rbp);
+        let fp = self.read_word_64(rbp).expect("can not read word");
+        println!("fp = {:#x}", fp);
+        for offset in vec![-24,-16,-8,0,8,16,24,32,40,48,56,64,72] {
+            let addr = (rbp as isize + offset) as usize;
+            let word = self.read_word_64(addr).expect("can not read word");
+            println!("offset = {} word = {:#b} word = {:#x}", offset, word, word);
+        }        
     }
 }
