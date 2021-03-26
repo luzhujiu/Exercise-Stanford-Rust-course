@@ -1,6 +1,7 @@
 use crossbeam_channel;
 use std::{thread, time};
 use std::default::Default;
+use std::time::Instant;
 
 fn parallel_map<T, U, F>(mut input_vec: Vec<T>, num_threads: usize, f: F) -> Vec<U>
 where
@@ -49,6 +50,7 @@ where
 }
 
 fn main() {
+    let start = Instant::now();
     let v = vec![6, 7, 8, 9, 10, 1, 2, 3, 4, 5, 12, 18, 11, 5, 20];
     let squares = parallel_map(v, 10, |num| {
         println!("{} squared is {}", num, num * num);
@@ -56,4 +58,5 @@ fn main() {
         num * num
     });
     println!("squares: {:?}", squares);
+    println!("Total execution time: {:?}", start.elapsed());
 }
