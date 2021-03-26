@@ -1,8 +1,19 @@
+extern crate select;
+#[macro_use]
+extern crate error_chain;
 use std::{thread, time};
 use std::sync::{Arc, Mutex, Condvar};
 use std::collections::VecDeque;
 use std::time::Instant;
+use select::document::Document;
+use select::predicate::Name;
 
+error_chain! {
+    foreign_links {
+        ReqError(reqwest::Error);
+        IoError(std::io::Error);
+    }
+}
 #[derive(Clone)]
 pub struct SemaPlusPlus<T> {
     queue_and_cv: Arc<(Mutex<VecDeque<T>>, Condvar)>,
@@ -49,7 +60,7 @@ fn create_chunks<T: Clone> (input_vec: Vec<(usize,T)>, num_threads: usize) -> Ve
 fn parallel_map<T, U, F>(mut input_vec: Vec<T>, num_threads: usize, f: F) -> Vec<U>
 where
     F: FnOnce(T) -> U + Send + Copy + 'static,
-    T: Send + 'static + Sync + Clone,
+    T: Send + 'static + Sync + Clone + std::fmt::Debug,
     U: Send + 'static + Default + Clone,
 {
     let input_vec = input_vec.into_iter().enumerate().collect::<Vec<_>>();
@@ -81,6 +92,39 @@ where
     output_vec.into_iter().map(|(_, elem)| elem).collect::<Vec<U>>()
 }
 
+fn main() -> Result<()> {
+    let body = reqwest::blocking::get("https://en.wikipedia.org/wiki/Multithreading_(computer_architecture)")?
+    .text()?;
+    
+    let links = Document::from_read(body.as_bytes())?
+        .find(Name("a"))
+        .filter_map(|n| {
+            if let Some(link_str) = n.attr("href") {
+                if link_str.starts_with("/wiki/") {
+                    Some(format!("{}/{}", "https://en.wikipedia.org",
+                        &link_str[1..]))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).collect::<Vec<String>>();
+
+    let start = Instant::now();    
+    
+    let outputs = parallel_map(links, 10, |link| {
+        let body = reqwest::blocking::get(&link).expect("").text().expect("");
+        (link, body.len())
+    });
+    
+    let max = outputs.iter().max_by(|x,y| x.1.cmp(&y.1)).unwrap();
+    println!("max = {:?}", max);
+    println!("Total execution time: {:?}", start.elapsed());
+    Ok(())
+}
+
+/*
 fn main() {
     let start = Instant::now();
     let v = vec![6, 7, 8, 9, 10, 1, 2, 3, 4, 5, 12, 18, 11, 5, 20];
@@ -92,3 +136,4 @@ fn main() {
     println!("squares: {:?}", squares);
     println!("Total execution time: {:?}", start.elapsed());
 }
+*/
