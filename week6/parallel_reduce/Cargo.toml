@@ -1,5 +1,5 @@
 [package]
-name = "thread_pool2"
+name = "parallel_reduce"
 version = "0.1.0"
 authors = ["murray501"]
 edition = "2018"
