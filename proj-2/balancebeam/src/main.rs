@@ -6,7 +6,11 @@ extern crate error_chain;
 
 use clap::Clap;
 use rand::{Rng, SeedableRng};
-use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt};
+use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::Mutex};
+use async_std::channel::{unbounded, Sender, Receiver};
+use async_std::task;
+use std::sync::Arc;
+use std::time::Instant;
 
 error_chain! {}
 
@@ -72,7 +76,7 @@ async fn main() {
         std::env::set_var("RUST_LOG", "debug");
     }
     
-    pretty_env_logger::init();
+    //pretty_env_logger::init();
 
     // Parse the command line arguments passed to this program
     let options = CmdOptions::parse();
@@ -99,13 +103,31 @@ async fn main() {
         max_requests_per_minute: options.max_requests_per_minute,
     };
 
+    //channel to maintain failed upstreams.
+    let (sender, receiver) = unbounded::<usize>();
+
     while let Some(stream) = listener.next().await {
         match stream {
             Ok(stream) => {
-                let state = state.clone();
+                let state = Arc::new(Mutex::new(state.clone()));
+                let clone = state.clone();
+                let sender = sender.clone();
+                let receiver = receiver.clone();
+                
                 tokio::spawn(async move {
-                    handle_connection(stream, state).await;
+                    while let Ok(idx) = receiver.recv().await {
+                        {
+                            let mut state = clone.lock().await;
+                            state.upstream_addresses[idx].1 = false;
+                            println!("{:?} -> {:?}", Instant::now(), state.upstream_addresses);
+                        }
+                    }
                 });
+
+                tokio::spawn(async move {
+                    handle_connection(stream, state, sender).await;
+                });
+                
             }
             Err(e) => {
                 log::error!("Connection failed. {:?}", e);
@@ -115,7 +137,9 @@ async fn main() {
     }
 }
 
-fn get_upstream_idx(state: &ProxyState) -> Option<usize> {
+async fn get_upstream_idx(state: &Arc<Mutex<ProxyState>>) -> Option<(usize, String)> {
+    let state = state.lock().await;
+    println!("{:?} -> {:?}", Instant::now(), state.upstream_addresses);
     let mut rng = rand::rngs::StdRng::from_entropy();
     let addresses = state.upstream_addresses.iter().filter(|x| x.1 == true).collect::<Vec<_>>();
     if addresses.is_empty() {
@@ -123,25 +147,22 @@ fn get_upstream_idx(state: &ProxyState) -> Option<usize> {
     } else {
         let idx = rng.gen_range(0, addresses.len());
         let upstream_idx = state.upstream_addresses.iter().position(|x| x.0 == addresses[idx].0).unwrap();
-        return Some(upstream_idx);
+        return Some((upstream_idx, addresses[idx].0.to_owned()));
     }
 } 
 
-async fn connect_to_upstream(mut state: ProxyState) -> Result<TcpStream> {
-    while let Some(upstream_idx) = get_upstream_idx(&state) {
-        let upstream_ip = &state.upstream_addresses[upstream_idx].0;
-        match TcpStream::connect(upstream_ip).await {
+async fn connect_to_upstream(state: Arc<Mutex<ProxyState>>, sender: Sender<usize>) -> Result<TcpStream> {
+    while let Some((upstream_idx, upstream_ip)) = get_upstream_idx(&state).await {
+        match TcpStream::connect(&upstream_ip).await {
             Ok(stream) => {
                 return Ok(stream);
             },
             Err(e) => {
-                log::info!("upstream is dead. {}", upstream_ip);
-                state.upstream_addresses[upstream_idx].1 = false;
+                sender.send(upstream_idx).await;
             }
         }
     }
-
-    let errmsg = ("All upstreams are dead.");
+    let errmsg = "All upstreams are dead.";
     log::error!("{}",errmsg);
     return Err(errmsg.into());
 }
@@ -155,12 +176,12 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: ProxyState) {
+async fn handle_connection(mut client_conn: TcpStream, state: Arc<Mutex<ProxyState>>, sender: Sender<usize>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
     // Open a connection to a random destination server
-    let mut upstream_conn = match connect_to_upstream(state).await {
+    let mut upstream_conn = match connect_to_upstream(state, sender).await {
         Ok(stream) => stream,
         Err(_error) => {
             let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
