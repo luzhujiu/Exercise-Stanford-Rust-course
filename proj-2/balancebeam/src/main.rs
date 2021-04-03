@@ -1,9 +1,14 @@
 mod request;
 mod response;
 
+#[macro_use]
+extern crate error_chain;
+
 use clap::Clap;
 use rand::{Rng, SeedableRng};
 use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt};
+
+error_chain! {}
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -55,7 +60,7 @@ struct ProxyState {
     #[allow(dead_code)]
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
-    upstream_addresses: Vec<String>,
+    upstream_addresses: Vec<(String, bool)>,
 }
 
 #[tokio::main]
@@ -88,7 +93,7 @@ async fn main() {
 
     // Handle incoming connections
     let state = ProxyState {
-        upstream_addresses: options.upstream,
+        upstream_addresses: options.upstream.into_iter().map(|x| (x, true)).collect::<Vec<_>>(),
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
@@ -99,7 +104,7 @@ async fn main() {
             Ok(stream) => {
                 let state = state.clone();
                 tokio::spawn(async move {
-                    handle_connection(stream, &state).await;
+                    handle_connection(stream, state).await;
                 });
             }
             Err(e) => {
@@ -110,15 +115,35 @@ async fn main() {
     }
 }
 
-async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
+fn get_upstream_idx(state: &ProxyState) -> Option<usize> {
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let upstream_idx = rng.gen_range(0, state.upstream_addresses.len());
-    let upstream_ip = &state.upstream_addresses[upstream_idx];
-    TcpStream::connect(upstream_ip).await.or_else(|err| {
-        log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
-        Err(err)
-    })
-    // TODO: implement failover (milestone 3)
+    let addresses = state.upstream_addresses.iter().filter(|x| x.1 == true).collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return None;
+    } else {
+        let idx = rng.gen_range(0, addresses.len());
+        let upstream_idx = state.upstream_addresses.iter().position(|x| x.0 == addresses[idx].0).unwrap();
+        return Some(upstream_idx);
+    }
+} 
+
+async fn connect_to_upstream(mut state: ProxyState) -> Result<TcpStream> {
+    while let Some(upstream_idx) = get_upstream_idx(&state) {
+        let upstream_ip = &state.upstream_addresses[upstream_idx].0;
+        match TcpStream::connect(upstream_ip).await {
+            Ok(stream) => {
+                return Ok(stream);
+            },
+            Err(e) => {
+                log::info!("upstream is dead. {}", upstream_ip);
+                state.upstream_addresses[upstream_idx].1 = false;
+            }
+        }
+    }
+
+    let errmsg = ("All upstreams are dead.");
+    log::error!("{}",errmsg);
+    return Err(errmsg.into());
 }
 
 async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Vec<u8>>) {
@@ -130,7 +155,7 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
+async fn handle_connection(mut client_conn: TcpStream, state: ProxyState) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
