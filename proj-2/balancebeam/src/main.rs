@@ -43,6 +43,7 @@ struct CmdOptions {
 /// to, what servers have failed, rate limiting counts, etc.)
 ///
 /// You should add fields to this struct in later milestones.
+#[derive(Clone)]
 struct ProxyState {
     /// How frequently we check whether upstream servers are alive (Milestone 4)
     #[allow(dead_code)]
@@ -96,7 +97,10 @@ async fn main() {
     while let Some(stream) = listener.next().await {
         match stream {
             Ok(stream) => {
-                handle_connection(stream, &state).await;
+                let state = state.clone();
+                tokio::spawn(async move {
+                    handle_connection(stream, &state).await;
+                });
             }
             Err(e) => {
                 log::error!("Connection failed. {:?}", e);
