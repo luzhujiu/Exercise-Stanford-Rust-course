@@ -6,7 +6,7 @@ extern crate error_chain;
 
 use clap::Clap;
 use rand::{Rng, SeedableRng};
-use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::Mutex};
+use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::RwLock};
 use std::sync::Arc;
 use rand::{thread_rng, seq::SliceRandom};
 
@@ -107,7 +107,7 @@ async fn main() {
         max_requests_per_minute: options.max_requests_per_minute,
     };
 
-    let state = Arc::new(Mutex::new(state));
+    let state = Arc::new(RwLock::new(state));
 
     while let Some(stream) = listener.next().await {
         match stream {
@@ -125,8 +125,8 @@ async fn main() {
     }
 }
 
-async fn shuffle(state: &Arc<Mutex<ProxyState>>) -> Vec<usize> {
-    let state = state.lock().await;
+async fn shuffle(state: &Arc<RwLock<ProxyState>>) -> Vec<usize> {
+    let state = state.read().await;
     let mut up = state.upstream_addresses.iter().enumerate()
         .filter(|(_, x)| x.active == true)
         .map(|x| x.0).collect::<Vec<usize>>();
@@ -135,13 +135,13 @@ async fn shuffle(state: &Arc<Mutex<ProxyState>>) -> Vec<usize> {
     return up;
 }
 
-async fn get_upstream_ip(state: &Arc<Mutex<ProxyState>>, idx: usize) -> String {
-    let state = state.lock().await;
+async fn get_upstream_ip(state: &Arc<RwLock<ProxyState>>, idx: usize) -> String {
+    let state = state.read().await;
     let ip = state.upstream_addresses[idx].ip.to_owned();
     return ip;
 }
 
-async fn connect_to_upstream(state: Arc<Mutex<ProxyState>>) -> Result<TcpStream> {
+async fn connect_to_upstream(state: Arc<RwLock<ProxyState>>) -> Result<TcpStream> {
 
     let indecies = shuffle(&state).await;
 
@@ -152,7 +152,7 @@ async fn connect_to_upstream(state: Arc<Mutex<ProxyState>>) -> Result<TcpStream>
                 return Ok(stream);
             },
             Err(e) => {
-                let mut state = state.lock().await;
+                let mut state = state.write().await;
                 state.upstream_addresses[idx].active = false;
             }
         }
@@ -172,7 +172,7 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: Arc<Mutex<ProxyState>>) {
+async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxyState>>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
