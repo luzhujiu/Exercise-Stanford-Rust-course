@@ -5,12 +5,9 @@ mod response;
 extern crate error_chain;
 
 use clap::Clap;
-//use rand::{Rng, SeedableRng};
-use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::Mutex};
-use async_std::channel::{unbounded, Sender, Receiver};
-use async_std::task;
+use rand::{Rng, SeedableRng};
+use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::RwLock};
 use std::sync::Arc;
-use std::time::Instant;
 use rand::{thread_rng, seq::SliceRandom};
 
 error_chain! {}
@@ -53,7 +50,7 @@ struct CmdOptions {
 /// to, what servers have failed, rate limiting counts, etc.)
 ///
 /// You should add fields to this struct in later milestones.
-#[derive(Clone)]
+#[derive(Debug)]
 struct ProxyState {
     /// How frequently we check whether upstream servers are alive (Milestone 4)
     #[allow(dead_code)]
@@ -65,7 +62,13 @@ struct ProxyState {
     #[allow(dead_code)]
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
-    upstream_addresses: Vec<String>,
+    upstream_addresses: Vec<uState>,
+}
+
+#[derive(Debug, Clone)]
+struct uState {
+    ip: String,
+    active: bool, 
 }
 
 #[tokio::main]
@@ -77,7 +80,7 @@ async fn main() {
         std::env::set_var("RUST_LOG", "debug");
     }
     
-    //pretty_env_logger::init();
+    pretty_env_logger::init();
 
     // Parse the command line arguments passed to this program
     let options = CmdOptions::parse();
@@ -98,24 +101,21 @@ async fn main() {
 
     // Handle incoming connections
     let state = ProxyState {
-        upstream_addresses: options.upstream,
+        upstream_addresses: options.upstream.into_iter().map(|x| uState{ip: x, active: true}).collect::<Vec<_>>(),
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
     };
 
-    //channel to maintain failed upstreams.
-    let (sender, receiver) = unbounded::<usize>();
-   
+    let state = Arc::new(RwLock::new(state));
+
     while let Some(stream) = listener.next().await {
         match stream {
             Ok(stream) => {
-                let state = state.clone();
-                let sender = sender.clone();
-                let receiver = receiver.clone();
+                let clone = Arc::clone(&state);
                 tokio::spawn(async move {
-                    handle_connection(stream, state, sender, receiver).await;
-                });   
+                    handle_connection(stream, clone).await;
+                });
             }
             Err(e) => {
                 log::error!("Connection failed. {:?}", e);
@@ -125,42 +125,35 @@ async fn main() {
     }
 }
 
-async fn contains(failed_streams: &Arc<Mutex<Vec<usize>>>, idx: usize) -> bool {
-    let vec = failed_streams.lock().await;
-    vec.contains(&idx)
+async fn shuffle(state: &Arc<RwLock<ProxyState>>) -> Vec<usize> {
+    let state = state.read().await;
+    let mut up = state.upstream_addresses.iter().enumerate()
+        .filter(|(_, x)| x.active == true)
+        .map(|x| x.0).collect::<Vec<usize>>();
+    
+    up.shuffle(&mut thread_rng());
+    return up;
 }
 
-async fn connect_to_upstream(state: &ProxyState, sender: Sender<usize>, receiver: Receiver<usize>) -> Result<TcpStream> {
-    
-    let failed_streams = Arc::new(Mutex::new(vec![]));
-    let failed_streams_clone = Arc::clone(&failed_streams);
+async fn get_upstream_ip(state: &Arc<RwLock<ProxyState>>, idx: usize) -> String {
+    let state = state.read().await;
+    let ip = state.upstream_addresses[idx].ip.to_owned();
+    return ip;
+}
 
-    tokio::spawn(async move {
-        while let Ok(idx) = receiver.recv().await {
-            let mut vec = failed_streams_clone.lock().await;
-            vec.push(idx);
-            println!("receive vec = {:?} -> {:?}", vec, Instant::now());
-        }
-    });
-    
-    let mut indecies = (0..state.upstream_addresses.len()).collect::<Vec<usize>>();
-    indecies.shuffle(&mut thread_rng());
+async fn connect_to_upstream(state: Arc<RwLock<ProxyState>>) -> Result<TcpStream> {
+
+    let indecies = shuffle(&state).await;
 
     for idx in indecies {
-        
-        if contains(&failed_streams, idx).await {
-            println!("find failed_stream");
-            continue;
-        }
-
-        let upstream_ip = &state.upstream_addresses[idx];
-        
+        let upstream_ip = get_upstream_ip(&state, idx).await;
         match TcpStream::connect(&upstream_ip).await {
             Ok(stream) => {
                 return Ok(stream);
             },
             Err(e) => {
-                sender.send(idx).await;
+                let mut state = state.write().await;
+                state.upstream_addresses[idx].active = false;
             }
         }
     }
@@ -179,14 +172,12 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: ProxyState, 
-                sender: Sender<usize>, receiver: Receiver<usize>) {
-    
+async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxyState>>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
     // Open a connection to a random destination server
-    let mut upstream_conn = match connect_to_upstream(&state, sender, receiver).await {
+    let mut upstream_conn = match connect_to_upstream(state).await {
         Ok(stream) => stream,
         Err(_error) => {
             let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
