@@ -6,9 +6,11 @@ extern crate error_chain;
 
 use clap::Clap;
 use rand::{Rng, SeedableRng};
-use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::RwLock};
+use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::RwLock, time};
 use std::sync::Arc;
 use rand::{thread_rng, seq::SliceRandom};
+use std::time::Duration;
+use tokio::time::Interval;
 
 error_chain! {}
 
@@ -53,10 +55,8 @@ struct CmdOptions {
 #[derive(Debug)]
 struct ProxyState {
     /// How frequently we check whether upstream servers are alive (Milestone 4)
-    #[allow(dead_code)]
     active_health_check_interval: usize,
     /// Where we should send requests when doing active health checks (Milestone 4)
-    #[allow(dead_code)]
     active_health_check_path: String,
     /// Maximum number of requests an individual IP can make in a minute (Milestone 5)
     #[allow(dead_code)]
@@ -108,6 +108,12 @@ async fn main() {
     };
 
     let state = Arc::new(RwLock::new(state));
+    
+    //health check
+    let clone_state = Arc::clone(&state);
+    let handle = tokio::spawn(async move {
+        health_check(&clone_state).await;
+    });
 
     while let Some(stream) = listener.next().await {
         match stream {
@@ -123,6 +129,8 @@ async fn main() {
             }
         }
     }
+
+    drop(handle);
 }
 
 async fn shuffle(state: &Arc<RwLock<ProxyState>>) -> Vec<usize> {
@@ -135,25 +143,29 @@ async fn shuffle(state: &Arc<RwLock<ProxyState>>) -> Vec<usize> {
     return up;
 }
 
-async fn get_upstream_ip(state: &Arc<RwLock<ProxyState>>, idx: usize) -> String {
+async fn get_upstream_ip(state: &Arc<RwLock<ProxyState>>, idx: usize) -> Option<String> {
     let state = state.read().await;
-    let ip = state.upstream_addresses[idx].ip.to_owned();
-    return ip;
+    if state.upstream_addresses[idx].active {
+        return Some(state.upstream_addresses[idx].ip.to_owned());
+    } else {
+        return None;
+    }
 }
 
 async fn connect_to_upstream(state: Arc<RwLock<ProxyState>>) -> Result<TcpStream> {
-
     let indecies = shuffle(&state).await;
 
     for idx in indecies {
-        let upstream_ip = get_upstream_ip(&state, idx).await;
-        match TcpStream::connect(&upstream_ip).await {
-            Ok(stream) => {
-                return Ok(stream);
-            },
-            Err(e) => {
-                let mut state = state.write().await;
-                state.upstream_addresses[idx].active = false;
+        if let Some(upstream_ip) = get_upstream_ip(&state, idx).await {
+            match TcpStream::connect(&upstream_ip).await {
+                Ok(stream) => {
+                    return Ok(stream);
+                },
+                Err(e) => {
+                    let mut state = state.write().await;
+                    state.upstream_addresses[idx].active = false;
+                    log::info!("Server-down is detected. {}", state.upstream_addresses[idx].ip);
+                }
             }
         }
     }
@@ -251,5 +263,87 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxySt
         // Forward the response to the client
         send_response(&mut client_conn, &response).await;
         log::debug!("Forwarded response to client");
+    }
+}
+
+//Health check -- milestone 4
+async fn get_addresses(state: &Arc<RwLock<ProxyState>>) -> Vec<String> {
+    let rstate = state.read().await;
+    rstate.upstream_addresses.iter().map(|x| x.ip.to_owned()).collect()
+}
+
+async fn get_seconds(state: &Arc<RwLock<ProxyState>>) -> usize {
+    let rstate = state.read().await;
+    let seconds = rstate.active_health_check_interval;
+    return seconds;
+}
+
+async fn get_path(state: &Arc<RwLock<ProxyState>>) -> String {
+    let rstate = state.read().await;
+    let path = rstate.active_health_check_path.to_owned();
+    return path; 
+}
+
+async fn copy_result(state: &Arc<RwLock<ProxyState>>, vec: &Vec<bool>) {
+    let mut wstate = state.write().await;
+    for i in 0..vec.len() {
+        wstate.upstream_addresses[i].active = vec[i];
+    }
+}
+
+async fn health_check(state: &Arc<RwLock<ProxyState>>) {
+    let seconds = get_seconds(&state).await;
+    let mut interval = time::interval(Duration::from_secs(seconds as u64));
+    let path = get_path(&state).await;
+    let ips = get_addresses(&state).await;
+    let mut status = vec![false; ips.len()];
+    log::info!("Health check start. -> interval {} seconds", seconds);
+    loop {
+        for (i, ip) in ips.iter().enumerate() {                             
+            let response = health_check_upstream(&ip, &path).await;
+            if response.is_ok() {
+                status[i] = true;
+            } else {
+                status[i] = false;
+            }
+        }
+        copy_result(&state, &status).await;
+        interval.tick().await;
+    }    
+}
+
+async fn health_check_upstream(upstream: &str, path: &str) -> Result<()>{  
+    log::info!("Health Check Start for {} : {}", upstream, path);  
+    if let Ok(mut upstream_conn) = TcpStream::connect(upstream).await {
+        let request: http::Request<Vec<u8>> = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(path)
+            .header("Host", upstream)
+            .body(Vec::new())
+            .unwrap();
+
+        if let Err(error) = request::write_to_stream(&request, &mut upstream_conn).await {
+            log::info!("Health Check Not PASS {} -> Failed to send request to upstream", upstream);
+            return Err("Failed to send request to upstream.".into());
+        };
+        
+        let response = match response::read_from_stream(&mut upstream_conn, request.method()).await {
+            Ok(response) => response,
+            Err(error) => {
+                log::info!("Health Check NOT PASS {} -> Error reading response from server", upstream);
+                return Err("Error reading response from upstream.".into());
+            }
+        };
+
+        if response.status() == http::StatusCode::OK {
+            log::info!("Health Check PASS. {} is running.", upstream);
+            return Ok(())
+        } else {
+            log::info!("Health Check NOT PASS {} -> Response status is not Ok {}", upstream, response.status().as_u16());
+            return Err("Response status is not ok.".into());
+        }
+    } else {
+        log::info!("Health Check NOT PASS {} -> connection error", upstream);
+        return Err("Connection Error".into());
     }
 }
