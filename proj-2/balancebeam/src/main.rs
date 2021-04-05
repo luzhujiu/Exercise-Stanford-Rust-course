@@ -107,44 +107,14 @@ async fn main() {
     //channel to maintain failed upstreams.
     let (sender, receiver) = unbounded::<usize>();
    
-    let bsenders: Arc<Mutex<Vec<Sender<usize>>>> = Arc::new(Mutex::new(vec![]));
-    let bsenders_clone = Arc::clone(&bsenders);
-
-    //receive failed upstream index.
-    tokio::spawn(async move {
-        while let Ok(idx) = receiver.recv().await {
-            let bsenders = bsenders_clone.lock().await;
-            for bsender in &(*bsenders) {
-                bsender.send(idx).await;
-            }
-
-            println!("send idx = {} -> {:?}", idx, Instant::now());
-        }
-    });
-
     while let Some(stream) = listener.next().await {
         match stream {
             Ok(stream) => {
                 let state = state.clone();
                 let sender = sender.clone();
-                let (bsender, breceiver) = unbounded::<usize>();
-                {
-                    let mut bsenders = bsenders.lock().await;
-                    bsenders.push(bsender);
-                }
-                let failed_streams = Arc::new(Mutex::new(vec![]));
-                let failed_streams_clone = Arc::clone(&failed_streams);
-
+                let receiver = receiver.clone();
                 tokio::spawn(async move {
-                    tokio::spawn(async move {
-                        while let Ok(idx) = breceiver.recv().await {
-                            let mut vec = failed_streams_clone.lock().await;
-                            vec.push(idx);
-                            println!("receive vec = {:?} -> {:?}", vec, Instant::now());
-                        }
-                    });
-
-                    handle_connection(stream, state, sender, failed_streams).await;
+                    handle_connection(stream, state, sender, receiver).await;
                 });   
             }
             Err(e) => {
@@ -157,17 +127,29 @@ async fn main() {
 
 async fn contains(failed_streams: &Arc<Mutex<Vec<usize>>>, idx: usize) -> bool {
     let vec = failed_streams.lock().await;
-    println!("vec = {:?} -> {:?}", vec, Instant::now());
     vec.contains(&idx)
 }
 
-async fn connect_to_upstream(state: &ProxyState, sender: Sender<usize>, failed_streams: Arc<Mutex<Vec<usize>>>) -> Result<TcpStream> {
+async fn connect_to_upstream(state: &ProxyState, sender: Sender<usize>, receiver: Receiver<usize>) -> Result<TcpStream> {
+    
+    let failed_streams = Arc::new(Mutex::new(vec![]));
+    let failed_streams_clone = Arc::clone(&failed_streams);
+
+    tokio::spawn(async move {
+        while let Ok(idx) = receiver.recv().await {
+            let mut vec = failed_streams_clone.lock().await;
+            vec.push(idx);
+            println!("receive vec = {:?} -> {:?}", vec, Instant::now());
+        }
+    });
+    
     let mut indecies = (0..state.upstream_addresses.len()).collect::<Vec<usize>>();
     indecies.shuffle(&mut thread_rng());
 
     for idx in indecies {
         
         if contains(&failed_streams, idx).await {
+            println!("find failed_stream");
             continue;
         }
 
@@ -198,13 +180,13 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
 }
 
 async fn handle_connection(mut client_conn: TcpStream, state: ProxyState, 
-                sender: Sender<usize>, failed_streams: Arc<Mutex<Vec<usize>>>) {
+                sender: Sender<usize>, receiver: Receiver<usize>) {
     
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
     // Open a connection to a random destination server
-    let mut upstream_conn = match connect_to_upstream(&state, sender, failed_streams).await {
+    let mut upstream_conn = match connect_to_upstream(&state, sender, receiver).await {
         Ok(stream) => stream,
         Err(_error) => {
             let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
