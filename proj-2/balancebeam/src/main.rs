@@ -6,11 +6,15 @@ extern crate error_chain;
 
 use clap::Clap;
 use rand::{Rng, SeedableRng};
-use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::RwLock, time};
-use std::sync::Arc;
-use rand::{thread_rng, seq::SliceRandom};
+//use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt};
+use tokio::{net::TcpListener, net::TcpStream};
+//use std::sync::Arc;
+//use rand::{thread_rng, seq::SliceRandom};
 use std::time::Duration;
-use tokio::time::Interval;
+//use tokio::time::Interval;
+use tokio::sync::watch::{Sender, Receiver};
+
+use tokio::runtime::Runtime;
 
 error_chain! {}
 
@@ -52,7 +56,7 @@ struct CmdOptions {
 /// to, what servers have failed, rate limiting counts, etc.)
 ///
 /// You should add fields to this struct in later milestones.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ProxyState {
     /// How frequently we check whether upstream servers are alive (Milestone 4)
     active_health_check_interval: usize,
@@ -62,14 +66,10 @@ struct ProxyState {
     #[allow(dead_code)]
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
-    upstream_addresses: Vec<uState>,
+    upstream_addresses: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-struct uState {
-    ip: String,
-    active: bool, 
-}
+type Report = Option<Vec<usize>>;
 
 #[tokio::main]
 async fn main() {
@@ -101,75 +101,71 @@ async fn main() {
 
     // Handle incoming connections
     let state = ProxyState {
-        upstream_addresses: options.upstream.into_iter().map(|x| uState{ip: x, active: true}).collect::<Vec<_>>(),
+        upstream_addresses: options.upstream,
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
     };
 
-    let state = Arc::new(RwLock::new(state));
-    
-    //health check
-    let clone_state = Arc::clone(&state);
-    let handle = tokio::spawn(async move {
-        health_check(&clone_state).await;
+    let mut runtime = Runtime::new().expect("failed to start new Runtime");
+    let (tx, rx) = tokio::sync::watch::channel(None); 
+     
+    //do health check
+    let state_clone = state.clone();
+    let handle = runtime.spawn(async move {
+        health_check(&state_clone, tx).await;
     });
 
-    while let Some(stream) = listener.next().await {
-        match stream {
-            Ok(stream) => {
-                let clone = Arc::clone(&state);
-                tokio::spawn(async move {
-                    handle_connection(stream, clone).await;
-                });
-            }
-            Err(e) => {
-                log::error!("Connection failed. {:?}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    drop(handle);
-}
-
-async fn shuffle(state: &Arc<RwLock<ProxyState>>) -> Vec<usize> {
-    let state = state.read().await;
-    let mut up = state.upstream_addresses.iter().enumerate()
-        .filter(|(_, x)| x.active == true)
-        .map(|x| x.0).collect::<Vec<usize>>();
+    while let Ok((stream, _)) = listener.accept().await {    
+        let rx1 = rx.clone(); 
+        let state = state.clone();
+        runtime.spawn(async move {
+            handle_connection(stream, &state, rx1).await;
+        });
+    }    
     
-    up.shuffle(&mut thread_rng());
-    return up;
+    runtime.shutdown_background();
+    log::info!("shut down.")
 }
 
-async fn get_upstream_ip(state: &Arc<RwLock<ProxyState>>, idx: usize) -> Option<String> {
-    let state = state.read().await;
-    if state.upstream_addresses[idx].active {
-        return Some(state.upstream_addresses[idx].ip.to_owned());
-    } else {
-        return None;
-    }
-}
+fn get_report(mut rx: &Receiver<Report>) -> Report {
+    (*rx).borrow().clone()
+} 
 
-async fn connect_to_upstream(state: Arc<RwLock<ProxyState>>) -> Result<TcpStream> {
-    let indecies = shuffle(&state).await;
+async fn connect_to_upstream(state: &ProxyState, rx: Receiver<Report>) -> Result<TcpStream> {
+    let mut rng = rand::rngs::StdRng::from_entropy();
+    let mut failed_server_self = vec![];
+    loop {
+        let report = get_report(&rx);
 
-    for idx in indecies {
-        if let Some(upstream_ip) = get_upstream_ip(&state, idx).await {
-            match TcpStream::connect(&upstream_ip).await {
-                Ok(stream) => {
-                    return Ok(stream);
-                },
-                Err(e) => {
-                    let mut state = state.write().await;
-                    state.upstream_addresses[idx].active = false;
-                    log::info!("Server-down is detected. {}", state.upstream_addresses[idx].ip);
-                }
+        let failed_server =
+            if let Some(report) = report { 
+                failed_server_self = vec![];
+                log::info!("report received. {:?}", report);
+                report
+            } else {
+                log::info!("report not received.");
+                failed_server_self.clone()
+            };
+
+        if failed_server.len() == state.upstream_addresses.len() {
+            break;
+        }
+        let idx = rng.gen_range(0, state.upstream_addresses.len());
+        if failed_server.contains(&idx) {
+            continue;
+        }
+        match TcpStream::connect(&state.upstream_addresses[idx]).await {
+            Ok(stream) => {
+                return Ok(stream);
+            },
+            Err(e) => {
+                failed_server_self.push(idx);
+                log::info!("Server-down is detected within connect_to_upstream = {}", idx);
+                log::info!("Server-down is not received. last report = {:?}", failed_server);
             }
         }
     }
-
     let errmsg = "All upstreams are dead.";
     log::error!("{}",errmsg);
     return Err(errmsg.into());
@@ -184,12 +180,12 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxyState>>) {
+async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState, receiver: Receiver<Report>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
     // Open a connection to a random destination server
-    let mut upstream_conn = match connect_to_upstream(state).await {
+    let mut upstream_conn = match connect_to_upstream(&state, receiver).await {
         Ok(stream) => stream,
         Err(_error) => {
             let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
@@ -267,47 +263,22 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<RwLock<ProxySt
 }
 
 //Health check -- milestone 4
-async fn get_addresses(state: &Arc<RwLock<ProxyState>>) -> Vec<String> {
-    let rstate = state.read().await;
-    rstate.upstream_addresses.iter().map(|x| x.ip.to_owned()).collect()
-}
-
-async fn get_seconds(state: &Arc<RwLock<ProxyState>>) -> usize {
-    let rstate = state.read().await;
-    let seconds = rstate.active_health_check_interval;
-    return seconds;
-}
-
-async fn get_path(state: &Arc<RwLock<ProxyState>>) -> String {
-    let rstate = state.read().await;
-    let path = rstate.active_health_check_path.to_owned();
-    return path; 
-}
-
-async fn copy_result(state: &Arc<RwLock<ProxyState>>, vec: &Vec<bool>) {
-    let mut wstate = state.write().await;
-    for i in 0..vec.len() {
-        wstate.upstream_addresses[i].active = vec[i];
-    }
-}
-
-async fn health_check(state: &Arc<RwLock<ProxyState>>) {
-    let seconds = get_seconds(&state).await;
-    let mut interval = time::interval(Duration::from_secs(seconds as u64));
-    let path = get_path(&state).await;
-    let ips = get_addresses(&state).await;
-    let mut status = vec![false; ips.len()];
+async fn health_check(state: &ProxyState, sender: Sender<Report>) {
+    let seconds = state.active_health_check_interval;
+    let mut interval = tokio::time::interval(Duration::from_secs(seconds as u64));
+    let path = &state.active_health_check_path;
     log::info!("Health check start. -> interval {} seconds", seconds);
+    
     loop {
-        for (i, ip) in ips.iter().enumerate() {                             
+        let mut failed_servers: Vec<usize> = vec![];
+        for (i, ip) in state.upstream_addresses.iter().enumerate() {                             
             let response = health_check_upstream(&ip, &path).await;
-            if response.is_ok() {
-                status[i] = true;
-            } else {
-                status[i] = false;
+            if response.is_err() {
+                failed_servers.push(i);
             }
         }
-        copy_result(&state, &status).await;
+        log::info!("Health check send report -> failed_servers = {:?}", failed_servers);
+        sender.send(Some(failed_servers)).unwrap();
         interval.tick().await;
     }    
 }
