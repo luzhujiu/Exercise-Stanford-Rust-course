@@ -69,6 +69,11 @@ struct ProxyState {
 
 type Report = Vec<String>;
 
+#[derive(Debug)]
+struct ReportState {
+    content: Report
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize the logging library. You can print log messages using the `log` macros:
@@ -107,23 +112,24 @@ async fn main() {
 
     //runtime setup
     let mut runtime = Runtime::new().expect("failed to start new Runtime");
-    //broadcast channel setup
-    let (tx, rx1) = channel::<Report>(1);
+
+    //create report_state
+    let report_state = Arc::new(RwLock::new(ReportState{ content: vec![] }));
 
     //health check
     let clone_state = state.clone();
-    let tx_clone = tx.clone();
+    let report_state_clone = Arc::clone(&report_state);
     let health_check_handle = runtime.spawn(async move {
-        health_check(&clone_state, tx_clone, rx1).await;
+        health_check(&clone_state, report_state_clone).await;
     });
 
     while let Some(stream) = listener.next().await {
         match stream {
             Ok(stream) => {
-                let mut rx2 = tx.subscribe();
-                let clone = state.clone();
+                let state_clone = state.clone();
+                let report_state_clone = Arc::clone(&report_state);
                 runtime.spawn(async move {
-                    handle_connection(stream, &clone, rx2).await;
+                    handle_connection(stream, &state_clone, report_state_clone).await;
                 });
             }
             Err(e) => {
@@ -132,22 +138,21 @@ async fn main() {
             }
         }
     }
-    drop(tx);
+    
     runtime.shutdown_background();
     log::info!("shut down.");
 }
 
-async fn connect_to_upstream(state: &ProxyState, mut rx: Receiver<Report>) -> Result<TcpStream> {
+async fn get_report(report_state: &Arc<RwLock<ReportState>>) -> Report {
+    let report = report_state.read().await;
+    report.content.to_owned()
+}
+
+async fn connect_to_upstream(state: &ProxyState, report_state: Arc<RwLock<ReportState>>) -> Result<TcpStream> {
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let mut report = vec![]; 
+    let mut report = get_report(&report_state).await;
+
     loop {
-        let received = rx.try_recv();
-        if let Ok(new_report) =  received {
-            report = new_report;
-            log::info!("connect_to_upstream. receive report = {:?}", report);
-        } else {
-            log::info!("connect_to_upstream. received {:?}", received);
-        }
         let idx = rng.gen_range(0, state.upstream_addresses.len());
         let upstream_ip = &state.upstream_addresses[idx];
         
@@ -178,12 +183,12 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState, rx: Receiver<Report>) {
+async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState, report_state: Arc<RwLock<ReportState>>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
     // Open a connection to a random destination server
-    let mut upstream_conn = match connect_to_upstream(&state, rx).await {
+    let mut upstream_conn = match connect_to_upstream(&state, report_state).await {
         Ok(stream) => stream,
         Err(_error) => {
             let response = response::make_http_error(http::StatusCode::BAD_GATEWAY);
@@ -261,7 +266,7 @@ async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState, rx: R
 }
 
 //Health check -- milestone 4
-async fn health_check(state: &ProxyState, tx: Sender<Report>, mut rx: Receiver<Report>) {
+async fn health_check(state: &ProxyState, report_state: Arc<RwLock<ReportState>>) {
     let seconds = state.active_health_check_interval;
     let mut interval = time::interval(Duration::from_secs(seconds as u64));
     let path = &state.active_health_check_path;
@@ -275,9 +280,12 @@ async fn health_check(state: &ProxyState, tx: Sender<Report>, mut rx: Receiver<R
                 failed_servers.push(ip.to_owned());
             }   
         }
-        tx.send(failed_servers).expect("health check send error");
-        let received = rx.recv().await.expect("health check receive error");
-        log::info!("Health check received self. -> {:?}", received);
+        {
+            let mut report = report_state.write().await;
+            if report.content != failed_servers {
+                report.content = failed_servers;
+            }
+        }
         interval.tick().await;
     }    
 }
