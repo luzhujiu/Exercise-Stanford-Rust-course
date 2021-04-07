@@ -10,7 +10,7 @@ use tokio::{net::TcpListener, net::TcpStream, stream::StreamExt, sync::RwLock, t
 use std::sync::Arc;
 use rand::{thread_rng, seq::SliceRandom};
 use std::time::Duration;
-use tokio::time::Interval;
+use tokio::time::{Interval, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::broadcast::{channel,Sender, Receiver, RecvError};
 
@@ -268,11 +268,12 @@ async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState, repor
 //Health check -- milestone 4
 async fn health_check(state: &ProxyState, report_state: Arc<RwLock<ReportState>>) {
     let seconds = state.active_health_check_interval;
-    let mut interval = time::interval(Duration::from_secs(seconds as u64));
+    let duration = Duration::from_secs(seconds as u64);
     let path = &state.active_health_check_path;
     
     log::info!("Health check start. -> interval {} seconds", seconds);
     loop {
+        std::thread::sleep(duration);
         let mut failed_servers = vec![];
         for ip in state.upstream_addresses.iter() {                             
             let response = health_check_upstream(&ip, &path).await;
@@ -286,7 +287,6 @@ async fn health_check(state: &ProxyState, report_state: Arc<RwLock<ReportState>>
                 report.content = failed_servers;
             }
         }
-        interval.tick().await;
     }    
 }
 
