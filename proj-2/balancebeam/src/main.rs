@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::time::{Interval, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::broadcast::{channel,Sender, Receiver, RecvError};
+use std::collections::HashMap;
 
 error_chain! {}
 
@@ -74,6 +75,11 @@ struct ReportState {
     content: Report
 }
 
+#[derive(Debug)]
+struct RateLimit {
+    map: HashMap<String, usize>
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize the logging library. You can print log messages using the `log` macros:
@@ -110,8 +116,9 @@ async fn main() {
         max_requests_per_minute: options.max_requests_per_minute,
     };
 
+    log::info!("ProxyState settings = {:?}", state);
     //runtime setup
-    let mut runtime = Runtime::new().expect("failed to start new Runtime");
+    let runtime = Runtime::new().expect("failed to start new Runtime");
 
     //create report_state
     let report_state = Arc::new(RwLock::new(ReportState{ content: vec![] }));
@@ -123,13 +130,34 @@ async fn main() {
         health_check(&clone_state, report_state_clone).await;
     });
 
+    //rate limit count
+    let rate_limit_count = Arc::new(RwLock::new(RateLimit{map: HashMap::new()})); 
+    let limit  = Arc::clone(&rate_limit_count);
+
+    if state.max_requests_per_minute > 0 {
+        runtime.spawn(async move {
+            let duration = Duration::from_secs(60);
+            loop {
+                tokio::time::delay_for(duration).await;
+                log::info!("rate limit clock ticking.");
+                {
+                    let mut limit = limit.write().await;
+                    limit.map = HashMap::new();
+                    log::info!("rate limit map reset = {:?}", limit.map);
+                }
+            }
+        });
+    }
+
     while let Some(stream) = listener.next().await {
         match stream {
             Ok(stream) => {
                 let state_clone = state.clone();
                 let report_state_clone = Arc::clone(&report_state);
+                let rate_limit_count_clone = Arc::clone(&rate_limit_count);
+
                 runtime.spawn(async move {
-                    handle_connection(stream, &state_clone, report_state_clone).await;
+                    handle_connection(stream, &state_clone, report_state_clone, rate_limit_count_clone).await;
                 });
             }
             Err(e) => {
@@ -150,7 +178,7 @@ async fn get_report(report_state: &Arc<RwLock<ReportState>>) -> Report {
 
 async fn connect_to_upstream(state: &ProxyState, report_state: Arc<RwLock<ReportState>>) -> Result<TcpStream> {
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let mut report = get_report(&report_state).await;
+    let report = get_report(&report_state).await;
 
     loop {
         let idx = rng.gen_range(0, state.upstream_addresses.len());
@@ -183,9 +211,19 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
-async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState, report_state: Arc<RwLock<ReportState>>) {
+async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState, 
+        report_state: Arc<RwLock<ReportState>>, rate_limit_count: Arc<RwLock<RateLimit>>) {
+
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
+
+    if state.max_requests_per_minute > 0 {
+        if rate_limit(&client_ip, &state, rate_limit_count).await {
+            let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+            send_response(&mut client_conn, &response).await;
+            return;
+        }
+    }
 
     // Open a connection to a random destination server
     let mut upstream_conn = match connect_to_upstream(&state, report_state).await {
@@ -273,7 +311,7 @@ async fn health_check(state: &ProxyState, report_state: Arc<RwLock<ReportState>>
     
     log::info!("Health check start. -> interval {} seconds", seconds);
     loop {
-        std::thread::sleep(duration);
+        tokio::time::delay_for(duration).await;
         let mut failed_servers = vec![];
         for ip in state.upstream_addresses.iter() {                             
             let response = health_check_upstream(&ip, &path).await;
@@ -324,4 +362,31 @@ async fn health_check_upstream(upstream: &str, path: &str) -> Result<()>{
         log::info!("Health Check NOT PASS {} -> connection error", upstream);
         return Err("Connection Error".into());
     }
+}
+
+//rate limiting
+async fn rate_limit(client_ip: &String, state: &ProxyState, rate_limit_count: Arc<RwLock<RateLimit>>) -> bool {       
+    if rate_over(&client_ip, &state, &rate_limit_count).await {
+        return true;
+    } else {
+        let mut rate_limit_count = rate_limit_count.write().await; 
+        if let Some(value) = rate_limit_count.map.get_mut(client_ip) {
+            *value = *value + 1;
+        } else {
+            rate_limit_count.map.insert(client_ip.to_owned(), 1);
+        }
+        return false;
+    }   
+}
+
+async fn rate_over(client_ip: &str, state: &ProxyState, rate_limit_count: &Arc<RwLock<RateLimit>>) -> bool {
+    let rate_limit_count = rate_limit_count.read().await;
+    log::info!("rate_limit_count = {:?}", rate_limit_count.map); 
+    let map = &rate_limit_count.map;
+    if let Some(value) = map.get(client_ip) {
+        if *value >= state.max_requests_per_minute {
+            return true;
+        }
+    }
+    return false;
 }
