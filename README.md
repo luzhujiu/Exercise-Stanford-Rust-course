@@ -1,5 +1,5 @@
 # silver-octo-parakeet
 
-programming practice
+do exercises.
 
 https://reberhardt.com/cs110l/spring-2020/
